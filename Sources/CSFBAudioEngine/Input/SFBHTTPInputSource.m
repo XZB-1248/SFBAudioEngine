@@ -24,9 +24,9 @@ static const NSInteger SFBHTTPInputSourceForwardSeekLimit = 256 * 1024;
 static const NSInteger SFBHTTPInputSourceParkSize = 1 * 1024 * 1024;
 /// What a transfer started by a distant seek asks for, so an excursion cannot drag the rest of
 /// the resource behind it.
-static const int64_t SFBHTTPInputSourceExcursionBytes = 1 * 1024 * 1024;
+static const NSInteger SFBHTTPInputSourceExcursionBytes = 1 * 1024 * 1024;
 /// Asks for everything from the start offset onward.
-static const int64_t SFBHTTPInputSourceUnboundedRequest = 0;
+static const NSInteger SFBHTTPInputSourceUnboundedRequest = 0;
 /// Consecutive failed transfers tolerated before a read gives up.
 static const NSInteger SFBHTTPInputSourceMaximumRetryCount = 5;
 /// Backoff before the first retry, doubled on each subsequent attempt.
@@ -344,28 +344,31 @@ static int64_t SFBParseContentRangeTotal(NSString *contentRange) {
     BOOL resumingParked = _parkedBuffer.length > 0 && offset >= _parkedOffset && offset <= parkedEnd;
 
     [self cancelTaskLocked];
-    if (resumingParked) {
-        _buffer = _parkedBuffer;
-        _bufferOffset = _parkedOffset;
-    } else {
-        _buffer = [NSMutableData data];
-        _bufferOffset = offset;
-    }
-    // One slot, and the window just left is the one worth keeping.
+
+    // One slot, and the window just left is the one worth keeping. Its head is what a return
+    // wants, and a copy rather than a truncation, since `setLength:` keeps the larger allocation.
+    NSMutableData *parked = _parkedBuffer;
+    int64_t parkedOffset = _parkedOffset;
     if (window.length > (NSUInteger)SFBHTTPInputSourceParkSize) {
-        [window setLength:(NSUInteger)SFBHTTPInputSourceParkSize];
+        window = [NSMutableData dataWithBytes:window.bytes length:(NSUInteger)SFBHTTPInputSourceParkSize];
     }
     _parkedBuffer = window;
     _parkedOffset = windowOffset;
     _readOffset = offset;
     _retryCount = 0;
-    // Reading on from a parked window is sequential again; a fresh landing is an excursion.
+
+    // Reading on from a parked window needs no transfer to succeed first, and is sequential again.
     if (resumingParked) {
+        _buffer = parked;
+        _bufferOffset = parkedOffset;
         [self startTaskLocked:SFBHTTPInputSourceUnboundedRequest];
         [self updateFlowControlLocked];
         [_condition unlock];
         return YES;
     }
+
+    _buffer = [NSMutableData data];
+    _bufferOffset = offset;
     [self startTaskLocked:SFBHTTPInputSourceExcursionBytes];
 
     BOOL seeked = [self waitForResponseLocked];
@@ -390,7 +393,7 @@ static int64_t SFBParseContentRangeTotal(NSString *contentRange) {
 
 /// Starts a transfer at the first unbuffered byte. `maxBytes` caps what this one request asks
 /// for; `SFBHTTPInputSourceUnboundedRequest` asks for everything left. `_condition` must be held.
-- (void)startTaskLocked:(int64_t)maxBytes {
+- (void)startTaskLocked:(NSInteger)maxBytes {
     int64_t start = _bufferOffset + (int64_t)_buffer.length;
 
     // A range request at or past the end draws a 416, so treat that position as an exhausted transfer.
@@ -419,7 +422,7 @@ static int64_t SFBParseContentRangeTotal(NSString *contentRange) {
     }
     if (end != SFBHTTPInputSourceUnknownLength) {
         [request setValue:[NSString stringWithFormat:@"bytes=%lld-%lld", start, end - 1]
-       forHTTPHeaderField:@"Range"];
+               forHTTPHeaderField:@"Range"];
     } else {
         [request setValue:[NSString stringWithFormat:@"bytes=%lld-", start] forHTTPHeaderField:@"Range"];
     }
